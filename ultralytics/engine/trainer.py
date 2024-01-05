@@ -31,7 +31,7 @@ from ultralytics.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.utils.files import get_latest_run
 from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle, select_device,
                                            strip_optimizer)
-
+from ultralytics.utils.prune_utils import get_ignore_bn
 
 class BaseTrainer:
     """
@@ -85,6 +85,12 @@ class BaseTrainer:
         self.metrics = None
         self.plots = {}
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
+
+        # Prune
+        self.bn_sparsity = self.args.bn_sparsity
+        self.sparsity_rate = self.args.sparsity_rate
+        self.ft_pruned_model = self.args.ft_pruned_model
+        self.ignore_bn_list = None
 
         # Dirs
         self.save_dir = get_save_dir(self.args)
@@ -215,6 +221,10 @@ class BaseTrainer:
         # Model
         self.run_callbacks('on_pretrain_routine_start')
         ckpt = self.setup_model()
+
+        if self.bn_sparsity or self.ft_pruned_model:
+            self.ignore_bn_list = get_ignore_bn(self.model)
+
         self.model = self.model.to(self.device)
         self.set_model_attributes()
 
@@ -348,6 +358,17 @@ class BaseTrainer:
                 # Backward
                 self.scaler.scale(self.loss).backward()
 
+                # sparse train
+                if self.bn_sparsity:
+                    print("---------------Sparse training------------------------")
+                    srtmp = self.sparsity_rate * (1 - 0.9 * epoch / self.epochs)
+                for k, m in self.model.named_modules():
+                    if isinstance(m, nn.BatchNorm2d) and (k not in self.ignore_bn_list):
+                        m.weight.grad.data.add_(
+                            srtmp * torch.sign(m.weight.data))  # L1
+                        m.bias.grad.data.add_(
+                            self.sparsity_rate * 10 * torch.sign(m.bias.data))  # L1
+                        
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
                     self.optimizer_step()

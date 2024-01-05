@@ -39,6 +39,10 @@ overlap_mask: True  # (bool) masks should overlap during training (segment train
 mask_ratio: 4  # (int) mask downsample ratio (segment train only)
 # Classification
 dropout: 0.0  # (float) use dropout regularization (classify train only)
+# prune
+bn_sparsity: True # train with L1 sparsity normalization
+sparsity_rate: 0.0001 # L1 normal sparse rate
+ft_pruned_model: False # finetune pruned model
 
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True  # (bool) validate/test during training
