@@ -4,12 +4,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv
 from .transformer import TransformerBlock
 
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C3x', 'C3TR', 'C3Ghost',
-           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'RepC3', 'ResNetLayer')
+           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'RepC3', 'C2fPruned', 'SPPFPruned')
 
 
 class DFL(nn.Module):
@@ -33,7 +34,7 @@ class DFL(nn.Module):
         return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
         # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
 
-
+        
 class Proto(nn.Module):
     """YOLOv8 mask Proto module for segmentation models."""
 
@@ -332,40 +333,54 @@ class BottleneckCSP(nn.Module):
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
 
-
-class ResNetBlock(nn.Module):
-    """ResNet block with standard convolution layers."""
-
-    def __init__(self, c1, c2, s=1, e=4):
-        """Initialize convolution with given parameters."""
+# pruned class 
+class Bottleneck_C2f(nn.Module):
+    # Standard bottleneck
+    def __init__(self, cv1in, cv1out, cv2out, shortcut=True, g=1, k=(3, 3), e=0.5):  # ch_in, ch_out, shortcut, groups, kernels, expand
         super().__init__()
-        c3 = e * c2
-        self.cv1 = Conv(c1, c2, k=1, s=1, act=True)
-        self.cv2 = Conv(c2, c2, k=3, s=s, p=1, act=True)
-        self.cv3 = Conv(c2, c3, k=1, act=False)
-        self.shortcut = nn.Sequential(Conv(c1, c3, k=1, s=s, act=False)) if s != 1 or c1 != c3 else nn.Identity()
+        c_ = int(cv2out * e)  # hidden channels
+        self.cv1 = Conv(cv1in, cv1out, k[0], 1)
+        self.cv2 = Conv(cv1out, cv2out, k[1], 1, g=g)
+        self.add = shortcut and cv1in == cv2out
 
     def forward(self, x):
-        """Forward pass through the ResNet block."""
-        return F.relu(self.cv3(self.cv2(self.cv1(x))) + self.shortcut(x))
 
-
-class ResNetLayer(nn.Module):
-    """ResNet layer with multiple ResNet blocks."""
-
-    def __init__(self, c1, c2, s=1, is_first=False, n=1, e=4):
-        """Initializes the ResNetLayer given arguments."""
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+    
+class C2fPruned(nn.Module):
+    # Faster Implementation of CSP Bottleneck with 2 convolutions
+    def __init__(self, cv1in, cv1out, cv2out,bottle_args, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
-        self.is_first = is_first
+        cv2in=0
+        for i in range(n):
+            cv2in=cv2in+bottle_args[i][-1]
 
-        if self.is_first:
-            self.layer = nn.Sequential(Conv(c1, c2, k=7, s=2, p=3, act=True),
-                                       nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
-        else:
-            blocks = [ResNetBlock(c1, c2, s, e=e)]
-            blocks.extend([ResNetBlock(e * c2, c2, 1, e=e) for _ in range(n - 1)])
-            self.layer = nn.Sequential(*blocks)
+        self.bottle_args=bottle_args
+        self.c = bottle_args[0][0]  # hidden channels
+        self.cv1 = Conv(cv1in, cv1out, 1, 1)
+        self.cv2 = Conv(cv2in+cv1out, cv2out, 1)  # optional act=FReLU(c2)
+
+        self.m = nn.ModuleList(Bottleneck_C2f(*bottle_args[k], shortcut, g, k=((3, 3), (3, 3)), e=1.0) for k in range(n))
+
 
     def forward(self, x):
-        """Forward pass through the ResNet layer."""
-        return self.layer(x)
+        """Forward pass through C2f layer."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+class SPPFPruned(nn.Module):
+    # Spatial pyramid pooling layer used in YOLOv3-SPP
+    def __init__(self, cv1in, cv1out, cv2out, k=5):
+        super(SPPFPruned, self).__init__()
+        self.cv1 = Conv(cv1in, cv1out, 1, 1)
+        self.cv2 = Conv(cv1out * 4, cv2out, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+
+    def forward(self, x):
+        x = self.cv1(x)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # suppress torch 1.9.0 max_pool2d() warning
+            y1 = self.m(x)
+            y2 = self.m(y1)
+            return self.cv2(torch.cat([x, y1, y2, self.m(y2)], 1))
