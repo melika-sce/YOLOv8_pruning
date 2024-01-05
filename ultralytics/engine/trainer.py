@@ -92,6 +92,7 @@ class BaseTrainer:
         self.bn_sparsity = self.args.bn_sparsity
         self.sparsity_rate = self.args.sparsity_rate
         self.ft_pruned_model = self.args.ft_pruned_model
+        self.model_list = None
         self.ignore_bn_list = None
         self.prune = self.args.prune
         self.prune_ratio = self.args.prune_ratio
@@ -100,8 +101,8 @@ class BaseTrainer:
         self.mask_bn = None
 
         if self.prune:
-            model_list, ignore_bn_list = get_bn_list(self.model)
-            self.model, self.mask_bn = get_mask_bn(self.model, self.ignore_bn_list, get_prune_threshold(model_list, self.prune_ratio))
+            self.model_list, self.ignore_bn_list = get_bn_list(self.model)
+            self.model, self.mask_bn = get_mask_bn(self.model, self.ignore_bn_list, get_prune_threshold(self.model_list, self.prune_ratio))
 
         # Dirs
         self.save_dir = get_save_dir(self.args)
@@ -157,7 +158,7 @@ class BaseTrainer:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         if RANK in (-1, 0):
             callbacks.add_integration_callbacks(self)
-
+        
     def add_callback(self, event: str, callback):
         """Appends the given callback."""
         self.callbacks[event].append(callback)
