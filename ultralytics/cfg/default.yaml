@@ -45,7 +45,7 @@ sparsity_rate: 0.0001 # L1 normal sparse rate
 ft_pruned_model: False # finetune pruned model
 prune: False
 prune_ratio: 0.50
-prune_iterative_steps: 1
+prune_iterative_step: 1
 prune_load: False
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True  # (bool) validate/test during training

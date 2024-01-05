@@ -32,6 +32,7 @@ from ultralytics.utils.files import get_latest_run
 from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle, select_device,
                                            strip_optimizer)
 from ultralytics.utils.prune_utils import get_ignore_bn, get_bn_weights
+from ultralytics.engine.model import Model
 
 class BaseTrainer:
     """
@@ -231,8 +232,7 @@ class BaseTrainer:
         
         if self.ft_pruned_model:
             srtmp = 0
-            # model = Model(ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get(
-            #     'anchors'), mask_bn=ckpt["model"].mask_bn).to(device)  # create
+            self.model = YOLO(ckpt["model"].yaml, mask_bn=ckpt["model"].mask_bn) # create
 
         self.model = self.model.to(self.device)
         self.set_model_attributes()
@@ -616,7 +616,7 @@ class BaseTrainer:
     def check_resume(self, overrides):
         """Check if resume checkpoint exists and update arguments accordingly."""
         resume = self.args.resume
-        if resume and not self.ft_pruned_model:
+        if resume:
             try:
                 exists = isinstance(resume, (str, Path)) and Path(resume).exists()
                 last = Path(check_file(resume) if exists else get_latest_run())

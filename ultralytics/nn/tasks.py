@@ -225,7 +225,7 @@ class BaseModel(nn.Module):
 class DetectionModel(BaseModel):
     """YOLOv8 detection model."""
 
-    def __init__(self, cfg='yolov8n.yaml', ch=3, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov8n.yaml', ch=3, nc=None, verbose=True, mask_bn=None):  # model, input channels, number of classes
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
@@ -235,7 +235,11 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override YAML value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+            self.mask_bn = mask_bn
+        if mask_bn != None:
+            self.model, self.save, self.from_to_map = parse_prune_model(deepcopy(self.yaml), ch=ch, verbose=verbose, mask_bn=mask_bn)  # model, savelist
+        else:
+            self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.inplace = self.yaml.get('inplace', True)
 
@@ -738,6 +742,206 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
+
+def parse_prune_model(d, ch, verbose=True, mask_bn=None):
+    """Parse a prune YOLO model.yaml dictionary into a PyTorch model."""
+    import ast
+
+    # Args
+    max_channels = float('inf')
+    nc = 10
+    scales = {'m': [0.67, 0.75, 768]}
+    act = None
+    depth, width, kpt_shape = (d.get(x, 1.0) for x in ('depth_multiple', 'width_multiple', 'kpt_shape'))
+    if scales:
+        scale = 'm'
+        if not scale:
+            scale = tuple(scales.keys())[0]
+            LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
+        depth, width, max_channels = scales[scale]
+
+    if act:
+        Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
+        if verbose:
+            LOGGER.info(f"{colorstr('activation:')} {act}")  # print
+
+    if verbose:
+        LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+    ch = [ch]
+    fromlayer = []  # last module bn layer name
+    from_to_map = {}
+    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+        m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]  # get module
+        for j, a in enumerate(args):
+            if isinstance(a, str):
+                with contextlib.suppress(ValueError):
+                    args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
+
+        n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        # print('n: ', n)
+        named_m_base = "model.{}".format(i)
+        if m in [Conv]:
+            named_m_bn = named_m_base + ".bn"
+            bnc = int(mask_bn[named_m_bn].sum())
+            c1, c2 = ch[f], bnc
+            args = [c1, c2, *args[1:]]
+            layertmp = named_m_bn
+            if i>0:
+                from_to_map[layertmp] = fromlayer[f]         
+            fromlayer.append(named_m_bn)
+
+        elif m in [C2fPruned]:
+            named_m_cv1_bn = named_m_base + ".cv1.bn"
+            named_m_cv2_bn = named_m_base + ".cv2.bn"
+            from_to_map[named_m_cv1_bn] = fromlayer[f]
+            fromlayer.append(named_m_cv2_bn)
+
+            cv1in = ch[f]
+            cv1out = int(mask_bn[named_m_cv1_bn].sum())
+            cv2out = int(mask_bn[named_m_cv2_bn].sum())
+
+            args = [cv1in, cv1out, cv2out, n, args[-1]]
+            bottle_args = []
+            c3fromlayer = [named_m_cv1_bn]
+
+            for p in range(n):
+                named_m_bottle_cv1_bn = named_m_base + ".m.{}.cv1.bn".format(p)
+                named_m_bottle_cv2_bn = named_m_base + ".m.{}.cv2.bn".format(p)
+
+
+                bottle_cv1out = int(mask_bn[named_m_bottle_cv1_bn].sum())
+                bottle_cv2out = int(mask_bn[named_m_bottle_cv2_bn].sum())
+
+                bottle_args.append([int(cv1out/2), bottle_cv1out, bottle_cv2out])
+                from_to_map[named_m_bottle_cv1_bn] = c3fromlayer[p]
+                from_to_map[named_m_bottle_cv2_bn] = named_m_bottle_cv1_bn
+                c3fromlayer.append(named_m_bottle_cv2_bn)
+            if n>1:
+                bottle_args[1][0]=bottle_args[0][2]                    
+            args.insert(3, bottle_args)
+
+            c2 = cv2out
+            n = 1
+            from_to_map[named_m_cv2_bn] = c3fromlayer
+
+        elif m in [SPPFPruned]:
+            named_m_cv1_bn = named_m_base + ".cv1.bn"
+            named_m_cv2_bn = named_m_base + ".cv2.bn"
+            cv1in = ch[f]
+
+
+            from_to_map[named_m_cv1_bn] = fromlayer[f]
+            from_to_map[named_m_cv2_bn] = [named_m_cv1_bn]*4
+            fromlayer.append(named_m_cv2_bn)
+            cv1out = int(mask_bn[named_m_cv1_bn].sum())
+            cv2out = int(mask_bn[named_m_cv2_bn].sum())
+            args = [cv1in, cv1out, cv2out, *args[1:]]
+            c2 = cv2out
+
+        elif m is nn.BatchNorm2d:
+            args = [ch[f]]
+        elif m is Concat:   
+            c2 = sum(ch[x] for x in f)
+            inputtmp = [fromlayer[x] for x in f]
+            fromlayer.append(inputtmp)
+
+        elif m is Detect:
+            from_to_map[named_m_base + ".m.0"] = fromlayer[f[0]]
+            from_to_map[named_m_base + ".m.1"] = fromlayer[f[1]]
+            from_to_map[named_m_base + ".m.2"] = fromlayer[f[2]]
+            args.append([ch[x] for x in f])
+            if isinstance(args[1], int):  # number of anchors
+                args[1] = [list(range(args[1] * 2))] * len(f)
+        else:
+            if isinstance(f, int):
+                c2 = ch[f]
+                fromtmp = fromlayer[-1]
+                fromlayer.append(fromtmp)
+            else:
+    
+                # yolov8 output head is connected to 3 consecutive output convolution layers, and it is not true when judging m is DetectPruned.
+                # The reason has not been found yet.
+                # record the input bn layer of this layer, that is, the number of output channels of the previous layer
+                from_to_map[named_m_base + ".cv2.0.0.bn"] = fromlayer[f[0]]
+                from_to_map[named_m_base + ".cv2.0.1.bn"] = named_m_base + ".cv2.0.0.bn"
+                from_to_map[named_m_base + ".cv2.0.2.bn"] = named_m_base + ".cv2.0.1.bn"
+                from_to_map[named_m_base + ".cv2.1.0.bn"] = fromlayer[f[1]]
+                from_to_map[named_m_base + ".cv2.1.1.bn"] = named_m_base + ".cv2.1.0.bn"
+                from_to_map[named_m_base + ".cv2.1.2.bn"] = named_m_base + ".cv2.1.1.bn"
+                from_to_map[named_m_base + ".cv2.2.0.bn"] = fromlayer[f[2]]
+                from_to_map[named_m_base + ".cv2.2.1.bn"] = named_m_base + ".cv2.2.0.bn"
+                from_to_map[named_m_base + ".cv2.2.2.bn"] = named_m_base + ".cv2.2.1.bn"
+
+                from_to_map[named_m_base + ".cv3.0.0.bn"] = fromlayer[f[0]]
+                from_to_map[named_m_base + ".cv3.0.1.bn"] = named_m_base + ".cv3.0.0.bn"
+                from_to_map[named_m_base + ".cv3.0.2.bn"] = named_m_base + ".cv3.0.1.bn"
+                from_to_map[named_m_base + ".cv3.1.0.bn"] = fromlayer[f[1]]
+                from_to_map[named_m_base + ".cv3.1.1.bn"] = named_m_base + ".cv3.1.0.bn"
+                from_to_map[named_m_base + ".cv3.1.2.bn"] = named_m_base + ".cv3.1.1.bn"
+                from_to_map[named_m_base + ".cv3.2.0.bn"] = fromlayer[f[2]]
+                from_to_map[named_m_base + ".cv3.2.1.bn"] = named_m_base + ".cv3.2.0.bn"
+                from_to_map[named_m_base + ".cv3.2.2.bn"] = named_m_base + ".cv3.2.1.bn"
+
+                from_to_map[named_m_base + ".cv4.0.0.bn"] = fromlayer[f[0]]
+                from_to_map[named_m_base + ".cv4.0.1.bn"] = named_m_base + ".cv4.0.0.bn"
+                from_to_map[named_m_base + ".cv4.0.2.bn"] = named_m_base + ".cv4.0.1.bn"
+                from_to_map[named_m_base + ".cv4.1.0.bn"] = fromlayer[f[1]]
+                from_to_map[named_m_base + ".cv4.1.1.bn"] = named_m_base + ".cv4.1.0.bn"
+                from_to_map[named_m_base + ".cv4.1.2.bn"] = named_m_base + ".cv4.1.1.bn"
+                from_to_map[named_m_base + ".cv4.2.0.bn"] = fromlayer[f[2]]
+                from_to_map[named_m_base + ".cv4.2.1.bn"] = named_m_base + ".cv4.2.0.bn"
+                from_to_map[named_m_base + ".cv4.2.2.bn"] = named_m_base + ".cv4.2.1.bn"
+
+
+                # save the number of new channels after pruning. If the v8 output header is not pruned, it will be closed
+                cv2_out1 = int(mask_bn[named_m_base + ".cv2.0.0.bn"].sum())
+                cv2_out2 = int(mask_bn[named_m_base + ".cv2.0.1.bn"].sum())
+                cv2_out3 = int(mask_bn[named_m_base + ".cv2.1.0.bn"].sum())
+                cv2_out4 = int(mask_bn[named_m_base + ".cv2.1.1.bn"].sum())
+                cv2_out5 = int(mask_bn[named_m_base + ".cv2.2.0.bn"].sum())
+                cv2_out6 = int(mask_bn[named_m_base + ".cv2.2.1.bn"].sum())
+                cv2_list=[[cv2_out1,cv2_out2],[cv2_out3,cv2_out4],[cv2_out5,cv2_out6]]
+
+                cv3_out1 = int(mask_bn[named_m_base + ".cv3.0.0.bn"].sum())
+                cv3_out2 = int(mask_bn[named_m_base + ".cv3.0.1.bn"].sum())
+                cv3_out3 = int(mask_bn[named_m_base + ".cv3.1.0.bn"].sum())
+                cv3_out4 = int(mask_bn[named_m_base + ".cv3.1.1.bn"].sum())
+                cv3_out5 = int(mask_bn[named_m_base + ".cv3.2.0.bn"].sum())
+                cv3_out6 = int(mask_bn[named_m_base + ".cv3.2.1.bn"].sum())
+                cv3_list=[[cv3_out1,cv3_out2],[cv3_out3,cv3_out4],[cv3_out5,cv3_out6]]
+
+                cv4_out1 = int(mask_bn[named_m_base + ".cv4.0.0.bn"].sum())
+                cv4_out2 = int(mask_bn[named_m_base + ".cv4.0.1.bn"].sum())
+                cv4_out3 = int(mask_bn[named_m_base + ".cv4.1.0.bn"].sum())
+                cv4_out4 = int(mask_bn[named_m_base + ".cv4.1.1.bn"].sum())
+                cv4_out5 = int(mask_bn[named_m_base + ".cv4.2.0.bn"].sum())
+                cv4_out6 = int(mask_bn[named_m_base + ".cv4.2.1.bn"].sum())
+                cv4_list=[[cv4_out1,cv4_out2],[cv4_out3,cv4_out4],[cv4_out5,cv4_out6]]
+
+                # pass in the parameters of the DetectPruned function
+                # If the output header is not pruned, the number of new_channel channels will be 0.
+                args=[2,[ch[f[0]],ch[f[1]],ch[f[2]]],[cv2_list,cv3_list,cv4_list]]
+                # If you do not prune, do not pass in the new_channels parameter.
+                # args=[2,[ch[f[0]],ch[f[1]],ch[f[2]]]]
+
+            
+
+
+        m_ = nn.Sequential(*(m(*args[i_p]) for i_p in range(n))) if n > 1 else m(*args)  # module
+        # print('m_',m_)
+        t = str(m)[8:-2].replace('__main__.', '')  # module type
+        np = sum(x.numel() for x in m_.parameters())  # number params
+        m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
+        LOGGER.info(f'{i:>3}{str(f):>18}{n_:>3}{np:10.0f}  {t:<40}{str(args):<30}')  # print
+        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+        layers.append(m_)
+        if i == 0:
+            ch = []
+        ch.append(c2)
+        # print('ch',ch)
+        # print('from_to_map',from_to_map)
+    return nn.Sequential(*layers), sorted(save), from_to_map
 
 
 def yaml_model_load(path):
