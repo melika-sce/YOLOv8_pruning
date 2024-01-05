@@ -12,6 +12,7 @@ from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
 
+from ultralytics.utils.prune_utils import get_ignore_bn, get_bn_weights, get_mask_bn, get_prune_threshold, get_bn_list
 
 class DetectionTrainer(BaseTrainer):
     """
@@ -68,6 +69,10 @@ class DetectionTrainer(BaseTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
+        if self.prune:
+            self.model_list, self.ignore_bn_list = get_bn_list(self.model)
+            self.model, self.mask_bn = get_mask_bn(self.model, self.ignore_bn_list, get_prune_threshold(self.model_list, self.prune_ratio))
+
         model = DetectionModel(cfg, nc=self.data['nc'], verbose=verbose and RANK == -1, mask_bn=self.mask_bn)
         if weights:
             model.load(weights)

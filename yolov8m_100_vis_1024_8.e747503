@@ -1,0 +1,14 @@
+pkill: 23796 - Operation not permitted
+pkill: 23839 - Operation not permitted
+pkill: 23796 - Operation not permitted
+pkill: 23839 - Operation not permitted
+pkill: 23796 - Operation not permitted
+pkill: 23839 - Operation not permitted
+Traceback (most recent call last):
+  File "train.py", line 3, in <module>
+    results = model.train(data='VisDrone.yaml', epochs=1, imgsz=1024, batch=1, prune=True)
+  File "/home/melikasabaghian.mut/MPKD/YOLOv8_pruning/ultralytics/engine/model.py", line 351, in train
+    self.trainer = (trainer or self._smart_load('trainer'))(overrides=args, _callbacks=self.callbacks)
+  File "/home/melikasabaghian.mut/MPKD/YOLOv8_pruning/ultralytics/engine/trainer.py", line 104, in __init__
+    self.model_list, self.ignore_bn_list = get_bn_list(self.model)
+AttributeError: 'DetectionTrainer' object has no attribute 'model'

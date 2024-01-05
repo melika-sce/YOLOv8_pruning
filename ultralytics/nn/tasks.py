@@ -10,7 +10,7 @@ import torch.nn as nn
 from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
-                                    ResNetLayer, RTDETRDecoder, Segment)
+                                    RTDETRDecoder, Segment, C2fPruned, SPPFPruned)
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
@@ -715,8 +715,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m is HGBlock:
                 args.insert(4, n)  # number of repeats
                 n = 1
-        elif m is ResNetLayer:
-            c2 = args[1] if args[3] else args[1] * 4
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
@@ -767,6 +765,8 @@ def parse_prune_model(d, ch, verbose=True, mask_bn=None):
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
+    fromlayer = []  # last module bn layer name
+    from_to_map = {}
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
         m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]  # get module
@@ -776,15 +776,70 @@ def parse_prune_model(d, ch, verbose=True, mask_bn=None):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        # rename c2f and sppf block to have pruned
+        named_m_base = "model.{}".format(i)
+        if m in [Conv]:
+            named_m_bn = named_m_base + ".bn"
+            bnc = int(mask_bn[named_m_bn].sum())
+            c1, c2 = ch[f], bnc
+            args = [c1, c2, *args[1:]]
+            layertmp = named_m_bn
+            if i>0:
+                from_to_map[layertmp] = fromlayer[f]         
+            fromlayer.append(named_m_bn)
+
         if m is C2f:
             m = 'C2fPruned'
             if m is C2fPruned:
-                
+                named_m_cv1_bn = named_m_base + ".cv1.bn"
+            named_m_cv2_bn = named_m_base + ".cv2.bn"
+            from_to_map[named_m_cv1_bn] = fromlayer[f]
+            fromlayer.append(named_m_cv2_bn)
+
+            cv1in = ch[f]
+            cv1out = int(mask_bn[named_m_cv1_bn].sum())
+            cv2out = int(mask_bn[named_m_cv2_bn].sum())
+
+            args = [cv1in, cv1out, cv2out, n, args[-1]]
+            bottle_args = []
+            c3fromlayer = [named_m_cv1_bn]
+
+            for p in range(n):
+                named_m_bottle_cv1_bn = named_m_base + ".m.{}.cv1.bn".format(p)
+                named_m_bottle_cv2_bn = named_m_base + ".m.{}.cv2.bn".format(p)
+
+
+                bottle_cv1out = int(mask_bn[named_m_bottle_cv1_bn].sum())
+                bottle_cv2out = int(mask_bn[named_m_bottle_cv2_bn].sum())
+
+                bottle_args.append([int(cv1out/2), bottle_cv1out, bottle_cv2out])
+                from_to_map[named_m_bottle_cv1_bn] = c3fromlayer[p]
+                from_to_map[named_m_bottle_cv2_bn] = named_m_bottle_cv1_bn
+                c3fromlayer.append(named_m_bottle_cv2_bn)
+            if n>1:
+                bottle_args[1][0]=bottle_args[0][2]                    
+            args.insert(3, bottle_args)
+
+            c2 = cv2out
+            n = 1
+            from_to_map[named_m_cv2_bn] = c3fromlayer
+
         elif m is SPPF:
             m = 'SPPFPruned'
+            if m is SPPFPruned:
+                named_m_cv1_bn = named_m_base + ".cv1.bn"
+            named_m_cv2_bn = named_m_base + ".cv2.bn"
+            cv1in = ch[f]
 
-        elif m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, Focus,
+
+            from_to_map[named_m_cv1_bn] = fromlayer[f]
+            from_to_map[named_m_cv2_bn] = [named_m_cv1_bn]*4
+            fromlayer.append(named_m_cv2_bn)
+            cv1out = int(mask_bn[named_m_cv1_bn].sum())
+            cv2out = int(mask_bn[named_m_cv2_bn].sum())
+            args = [cv1in, cv1out, cv2out, *args[1:]]
+            c2 = cv2out
+
+        elif m in (Classify, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, Focus,
                  BottleneckCSP, C1, C2, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -802,8 +857,6 @@ def parse_prune_model(d, ch, verbose=True, mask_bn=None):
             if m is HGBlock:
                 args.insert(4, n)  # number of repeats
                 n = 1
-        elif m is ResNetLayer:
-            c2 = args[1] if args[3] else args[1] * 4
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:

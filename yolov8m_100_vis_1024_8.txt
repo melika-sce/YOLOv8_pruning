@@ -1,0 +1,1 @@
+Ultralytics YOLOv8.0.234 🚀 Python-3.8.18 torch-2.0.1 CUDA:0 (NVIDIA GeForce RTX 2070 SUPER, 7982MiB)

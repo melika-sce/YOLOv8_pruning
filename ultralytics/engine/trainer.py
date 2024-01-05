@@ -32,9 +32,6 @@ from ultralytics.utils.files import get_latest_run
 from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle, select_device,
                                            strip_optimizer)
 
-from ultralytics.utils.prune_utils import get_ignore_bn, get_bn_weights, get_mask_bn, get_prune_threshold, get_bn_list
-from ultralytics.engine.model import Model
-
 class BaseTrainer:
     """
     BaseTrainer.
@@ -99,10 +96,6 @@ class BaseTrainer:
         self.prune_iterative_step = self.args.prune_iterative_step
         self.prune_load = self.args.prune_load
         self.mask_bn = None
-
-        if self.prune:
-            self.model_list, self.ignore_bn_list = get_bn_list(self.model)
-            self.model, self.mask_bn = get_mask_bn(self.model, self.ignore_bn_list, get_prune_threshold(self.model_list, self.prune_ratio))
 
         # Dirs
         self.save_dir = get_save_dir(self.args)
