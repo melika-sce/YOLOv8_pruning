@@ -1,4 +1,6 @@
 from ultralytics.nn.modules import Bottleneck, Detect
+import torch
+from torch import nn
 
 
 def get_ignore_bn(model):
@@ -32,3 +34,20 @@ def get_ignore_bn(model):
                 ignore_bn_list.append(k+".cv4.2.0.bn")
                 ignore_bn_list.append(k+".cv4.2.1.bn")
     return ignore_bn_list
+
+def get_bn_weights(model, ignore_bn_list):
+    module_list = []
+    for j, layer in model.named_modules():
+        if isinstance(layer, nn.BatchNorm2d) and j not in ignore_bn_list:
+            bnw = layer.state_dict()['weight']
+            module_list.append(bnw)
+
+    size_list = [idx.data.shape[0] for idx in module_list]
+
+    bn_weights = torch.zeros(sum(size_list))
+    index = 0
+    for idx, size in enumerate(size_list):
+        bn_weights[index:(index + size)
+                   ] = module_list[idx].data.abs().clone()
+        index += size
+    return bn_weights

@@ -31,7 +31,7 @@ from ultralytics.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.utils.files import get_latest_run
 from ultralytics.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle, select_device,
                                            strip_optimizer)
-from ultralytics.utils.prune_utils import get_ignore_bn
+from ultralytics.utils.prune_utils import get_ignore_bn, get_bn_weights
 
 class BaseTrainer:
     """
@@ -228,6 +228,11 @@ class BaseTrainer:
 
         if self.bn_sparsity or self.ft_pruned_model:
             self.ignore_bn_list = get_ignore_bn(self.model)
+        
+        if self.ft_pruned_model:
+            srtmp = 0
+            # model = Model(ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get(
+            #     'anchors'), mask_bn=ckpt["model"].mask_bn).to(device)  # create
 
         self.model = self.model.to(self.device)
         self.set_model_attributes()
@@ -435,6 +440,11 @@ class BaseTrainer:
                     self.scheduler.last_epoch = self.epoch  # do not move
                     self.stop |= epoch >= self.epochs  # stop if exceeded epochs
                 self.scheduler.step()
+             
+            if self.bn_sparsity or self.ft_pruned_model:
+                # Show BN weight distribution
+                bn_weights = get_bn_weights(self.model, self.ignore_bn_list)
+                print('bn_weights: ', bn_weights.numpy())
             self.run_callbacks('on_fit_epoch_end')
             torch.cuda.empty_cache()  # clear GPU memory at end of epoch, may help reduce CUDA out of memory errors
 
@@ -606,7 +616,7 @@ class BaseTrainer:
     def check_resume(self, overrides):
         """Check if resume checkpoint exists and update arguments accordingly."""
         resume = self.args.resume
-        if resume:
+        if resume and not self.ft_pruned_model:
             try:
                 exists = isinstance(resume, (str, Path)) and Path(resume).exists()
                 last = Path(check_file(resume) if exists else get_latest_run())
