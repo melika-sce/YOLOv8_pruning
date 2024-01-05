@@ -91,6 +91,10 @@ class BaseTrainer:
         self.sparsity_rate = self.args.sparsity_rate
         self.ft_pruned_model = self.args.ft_pruned_model
         self.ignore_bn_list = None
+        self.prune = self.args.prune
+        self.prune_ratio = self.args.prune_ratio
+        self.prune_iterative_step = self.args.prune_iterative_step
+        self.prune_load = self.args.prune_load
 
         # Dirs
         self.save_dir = get_save_dir(self.args)
