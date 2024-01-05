@@ -366,6 +366,7 @@ class BaseTrainer:
                 if self.bn_sparsity:
                     print("---------------Sparse training------------------------")
                     srtmp = self.sparsity_rate * (1 - 0.9 * epoch / self.epochs)
+                    print('srtmp: ', srtmp)
                 for k, m in self.model.named_modules():
                     if isinstance(m, nn.BatchNorm2d) and (k not in self.ignore_bn_list):
                         m.weight.grad.data.add_(
